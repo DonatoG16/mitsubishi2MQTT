@@ -33,6 +33,8 @@ ESP8266WebServer server(80);  // ESP8266 web
 #include <PubSubClient.h>     // MQTT: PubSubClient 2.8.0
 #include <DNSServer.h>        // DNS for captive portal
 #include <math.h>             // for rounding to Fahrenheit values
+#include <map>
+#include <cmath>              // For roundf function
 
 #include <ArduinoOTA.h>   // for OTA
 #include <HeatPump.h>     // SwiCago library: https://github.com/SwiCago/HeatPump
@@ -192,7 +194,7 @@ void setup() {
     heatpumpSettings currentSettings = hp.getSettings();
     rootInfo["roomTemperature"]     = convertCelsiusToLocalUnit(currentStatus.roomTemperature, useFahrenheit);
     rootInfo["temperature"]         = convertCelsiusToLocalUnit(currentSettings.temperature, useFahrenheit);
-    rootInfo["fan"]                 = currentSettings.fan;
+    rootInfo["fan"]                 = hpGetFan(currentSettings);
     rootInfo["vane"]                = currentSettings.vane;
     rootInfo["wideVane"]            = currentSettings.wideVane;
     rootInfo["mode"]                = hpGetMode(currentSettings);
@@ -747,7 +749,7 @@ void handleUnit() {
   if (!checkLogin()) return;
 
   if (server.method() == HTTP_POST) {
-    saveUnit(server.arg("tu"), server.arg("md"), server.arg("lpw"), (String)convertLocalUnitToCelsius(server.arg("min_temp").toInt(), useFahrenheit), (String)convertLocalUnitToCelsius(server.arg("max_temp").toInt(), useFahrenheit), server.arg("temp_step"));
+    saveUnit(server.arg("tu"), server.arg("md"), server.arg("lpw"), (String)convertLocalUnitToCelsius(server.arg("min_temp").toFloat(), useFahrenheit), (String)convertLocalUnitToCelsius(server.arg("max_temp").toFloat(), useFahrenheit), server.arg("temp_step"));
     rebootAndSendPage();
   }
   else {
@@ -1264,7 +1266,7 @@ heatpumpSettings change_states(heatpumpSettings settings) {
       update = true;
     }
     if (server.hasArg("TEMP")) {
-      settings.temperature = convertLocalUnitToCelsius(server.arg("TEMP").toInt(), useFahrenheit);
+      settings.temperature = convertLocalUnitToCelsius(server.arg("TEMP").toFloat(), useFahrenheit);
       update = true;
     }
     if (server.hasArg("FAN")) {
@@ -1291,7 +1293,7 @@ void readHeatPumpSettings() {
 
   rootInfo.clear();
   rootInfo["temperature"]     = convertCelsiusToLocalUnit(currentSettings.temperature, useFahrenheit);
-  rootInfo["fan"]             = currentSettings.fan;
+  rootInfo["fan"]             = hpGetFan(currentSettings);
   rootInfo["vane"]            = currentSettings.vane;
   rootInfo["wideVane"]        = currentSettings.wideVane;
   rootInfo["mode"]            = hpGetMode(currentSettings);
@@ -1313,7 +1315,7 @@ void hpSettingsChanged() {
 
 String hpGetMode(heatpumpSettings hpSettings) {
   // Map the heat pump state to one of HA's HVAC_MODE_* values.
-  // https://github.com/home-assistant/core/blob/master/homeassistant/components/climate/const.py#L3-L23
+  // https://github.com/home-assistant/core/blob/master/homeassistant/components/climate/const.py#L17-L37
 
   String hppower = String(hpSettings.power);
   if (hppower.equalsIgnoreCase("off")){
@@ -1326,6 +1328,21 @@ String hpGetMode(heatpumpSettings hpSettings) {
   if (hpmode == "fan")       return "fan_only";
   else if (hpmode == "auto") return "heat_cool";
   else                       return hpmode; // cool, heat, dry
+}
+
+String hpGetFan(heatpumpSettings hpSettings) {
+  // Map the fan speed to one of HA's FAN_* values.
+  // https://github.com/home-assistant/core/blob/master/homeassistant/components/climate/const.py#L75-L85
+
+  String hpfan = String(hpSettings.fan);
+  hpfan.toLowerCase();
+
+  if (hpfan == "quiet")  return "diffuse";
+  else if (hpfan == "1") return "low";
+  else if (hpfan == "2") return "middle";
+  else if (hpfan == "3") return "medium";
+  else if (hpfan == "4") return "high";
+  else                   return hpfan; // auto
 }
 
 String hpGetAction(heatpumpStatus hpStatus, heatpumpSettings hpSettings) {
@@ -1361,7 +1378,7 @@ void hpStatusChanged(heatpumpStatus currentStatus) {
     rootInfo.clear();
     rootInfo["roomTemperature"]     = convertCelsiusToLocalUnit(currentStatus.roomTemperature, useFahrenheit);
     rootInfo["temperature"]         = convertCelsiusToLocalUnit(currentSettings.temperature, useFahrenheit);
-    rootInfo["fan"]                 = currentSettings.fan;
+    rootInfo["fan"]                 = hpGetFan(currentSettings);
     rootInfo["vane"]                = currentSettings.vane;
     rootInfo["wideVane"]            = currentSettings.wideVane;
     rootInfo["mode"]                = hpGetMode(currentSettings);
@@ -1483,9 +1500,23 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     hp.setTemperature(temperature_c);
   }
   else if (strcmp(topic, ha_fan_set_topic.c_str()) == 0) {
+    String fanUpper = message;
+    fanUpper.toUpperCase();
+    String fanSpeed = fanUpper;
+    if (fanUpper == "DIFFUSE") {
+      fanSpeed = "QUIET";
+    } else if (fanUpper == "LOW") {
+      fanSpeed = "1";
+    } else if (fanUpper == "MIDDLE") {
+      fanSpeed = "2";
+    } else if (fanUpper == "MEDIUM") {
+      fanSpeed = "3";
+    } else if (fanUpper == "HIGH") {
+      fanSpeed = "4";
+    }
     rootInfo["fan"] = (String) message;
     hpSendLocalState();
-    hp.setFanSpeed(message);
+    hp.setFanSpeed(fanSpeed.c_str());
   }
   else if (strcmp(topic, ha_vane_set_topic.c_str()) == 0) {
     rootInfo["vane"] = (String) message;
@@ -1606,12 +1637,12 @@ void haConfig() {
   haConfig["temperature_unit"]              = useFahrenheit ? "F" : "C";
 
   JsonArray haConfigFan_modes = haConfig.createNestedArray("fan_modes");
-  haConfigFan_modes.add("AUTO");
-  haConfigFan_modes.add("QUIET");
-  haConfigFan_modes.add("1");
-  haConfigFan_modes.add("2");
-  haConfigFan_modes.add("3");
-  haConfigFan_modes.add("4");
+  haConfigFan_modes.add("auto");
+  haConfigFan_modes.add("diffuse");
+  haConfigFan_modes.add("low");
+  haConfigFan_modes.add("middle");
+  haConfigFan_modes.add("medium");
+  haConfigFan_modes.add("high");
 
   haConfig["fan_mode_cmd_t"]                = ha_fan_set_topic;
   haConfig["fan_mode_stat_t"]               = ha_state_topic;
@@ -1640,6 +1671,12 @@ void haConfig() {
   haConfigDevice["mdl"]   = "HVAC MITSUBISHI";
   haConfigDevice["mf"]    = "MITSUBISHI ELECTRIC";
   haConfigDevice["configuration_url"]    = "http://"+WiFi.localIP().toString();
+  
+  // Additional attributes are in the state
+  // For now, only compressorFrequency
+  haConfig["json_attr_t"]                   = ha_state_topic;
+  haConfig["json_attr_tpl"]                 = F("{{ {'compressorFrequency': value_json.compressorFrequency if (value_json is defined and value_json.compressorFrequency is defined) else '-1' } | tojson }}");
+  
   
   String mqttOutput;
   serializeJson(haConfig, mqttOutput);
@@ -1737,14 +1774,50 @@ bool connectWifi() {
   return true;
 }
 
-// temperature helper functions
-float toFahrenheit(float fromCelcius) {
-  return round(1.8 * fromCelcius + 32.0);
+// temperature helper these are direct mappings based on the remote
+float toFahrenheit(float fromCelsius) {
+    // Lookup table for specific mappings
+    const std::map<float, int> lookupTable = {
+        {16.0, 61}, {16.5, 62}, {17.0, 63}, {17.5, 64}, {18.0, 65},
+        {18.5, 66}, {19.0, 67}, {20.0, 68}, {21.0, 69}, {21.5, 70},
+        {22.0, 71}, {22.5, 72}, {23.0, 73}, {23.5, 74}, {24.0, 75},
+        {24.5, 76}, {25.0, 77}, {25.5, 78}, {26.0, 79}, {26.5, 80},
+        {27.0, 81}, {27.5, 82}, {28.0, 83}, {28.5, 84}, {29.0, 85},
+        {29.5, 86}, {30.0, 87}, {30.5, 88}
+    };
+
+    // Check if the input is in the lookup table
+    auto it = lookupTable.find(fromCelsius);
+    if (it != lookupTable.end()) {
+        return it->second;
+    }
+
+    // Default conversion and rounding to nearest integer
+    return roundf(fromCelsius * 1.8 + 32.0);
 }
 
+// temperature helper these are direct mappings based on the remote
 float toCelsius(float fromFahrenheit) {
-  return (fromFahrenheit - 32.0) / 1.8;
+    // Lookup table for specific mappings
+    const std::map<int, float> lookupTable = {
+        {61, 16.0}, {62, 16.5}, {63, 17.0}, {64, 17.5}, {65, 18.0},
+        {66, 18.5}, {67, 19.0}, {68, 20.0}, {69, 21.0}, {70, 21.5},
+        {71, 22.0}, {72, 22.5}, {73, 23.0}, {74, 23.5}, {75, 24.0},
+        {76, 24.5}, {77, 25.0}, {78, 25.5}, {79, 26.0}, {80, 26.5},
+        {81, 27.0}, {82, 27.5}, {83, 28.0}, {84, 28.5}, {85, 29.0},
+        {86, 29.5}, {87, 30.0}, {88, 30.5}
+    };
+
+    // Check if the input is in the lookup table
+    auto it = lookupTable.find(static_cast<int>(fromFahrenheit));
+    if (it != lookupTable.end()) {
+        return it->second;
+    }
+
+    // Default conversion and rounding to nearest 0.5
+    return roundf((fromFahrenheit - 32.0) / 1.8 * 2) / 2.0;
 }
+
 
 float convertCelsiusToLocalUnit(float temperature, bool isFahrenheit) {
   if (isFahrenheit) {
